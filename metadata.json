@@ -3,7 +3,6 @@
   "description": "A real-time AI assistant that can see your screen or camera and talk to you using the Gemini Live API.",
   "requestFramePermissions": [
     "camera",
-    "microphone",
-    "display-capture"
+    "microphone"
   ]
 }

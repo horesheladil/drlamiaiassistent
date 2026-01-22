@@ -34,7 +34,10 @@ const App: React.FC = () => {
   useEffect(() => {
     const handleScroll = () => setScrolled(window.scrollY > 50);
     window.addEventListener('scroll', handleScroll);
-    return () => window.removeEventListener('scroll', handleScroll);
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+      stopAiSession(); // Cleanup on unmount
+    };
   }, []);
 
   const stopAiSession = useCallback(() => {
@@ -52,8 +55,7 @@ const App: React.FC = () => {
       setIsAiActive(true);
       setAiMode('connecting');
       
-      // Use cast to bypass TypeScript env variable checks during the Vercel build phase
-      const apiKey = (process.env as any).API_KEY || '';
+      const apiKey = process.env.API_KEY || '';
       const ai = new GoogleGenAI({ apiKey });
       
       const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
@@ -111,23 +113,17 @@ const App: React.FC = () => {
           },
           onmessage: async (m: LiveServerMessage) => {
             try {
-              // Extremely defensive property checking for strict TypeScript builds
-              if (!m) return;
-              const content = m.serverContent;
-              if (!content) return;
-              const turn = content.modelTurn;
-              if (!turn) return;
-              const parts = turn.parts;
-              if (!parts || parts.length === 0) return;
-              const part = parts[0];
-              if (!part.inlineData || !part.inlineData.data) return;
+              if (!m?.serverContent?.modelTurn?.parts) return;
+              const turn = m.serverContent.modelTurn;
+              const firstPart = turn.parts[0];
+              if (!firstPart?.inlineData?.data) return;
 
-              const base64Data = part.inlineData.data;
+              const data = firstPart.inlineData.data;
               const ctx = audioContextOutRef.current;
-              
               if (ctx) {
+                if (ctx.state === 'suspended') await ctx.resume();
                 nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-                const buf = await decodeAudioData(decode(base64Data), ctx, 24000, 1);
+                const buf = await decodeAudioData(decode(data), ctx, 24000, 1);
                 const s = ctx.createBufferSource();
                 s.buffer = buf;
                 s.connect(ctx.destination);
@@ -141,7 +137,7 @@ const App: React.FC = () => {
                 setAiMode('speaking');
               }
             } catch (err) {
-              console.error("Audio processing failed", err);
+              console.error("Audio processing failed:", err);
             }
           },
           onclose: () => stopAiSession(),
