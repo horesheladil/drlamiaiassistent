@@ -36,7 +36,7 @@ const App: React.FC = () => {
     window.addEventListener('scroll', handleScroll);
     return () => {
       window.removeEventListener('scroll', handleScroll);
-      stopAiSession(); // Cleanup on unmount
+      stopAiSession();
     };
   }, []);
 
@@ -44,10 +44,18 @@ const App: React.FC = () => {
     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
     if (screenStreamRef.current) screenStreamRef.current.getTracks().forEach(t => t.stop());
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
-    sourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
+    
+    sourcesRef.current.forEach(s => { 
+      try { s.stop(); } catch(e) {} 
+    });
     sourcesRef.current.clear();
+    
+    if (audioContextInRef.current) audioContextInRef.current.close();
+    if (audioContextOutRef.current) audioContextOutRef.current.close();
+    
     setAiMode('idle');
     setIsAiActive(false);
+    nextStartTimeRef.current = 0;
   }, []);
 
   const startAiSession = async () => {
@@ -55,8 +63,7 @@ const App: React.FC = () => {
       setIsAiActive(true);
       setAiMode('connecting');
       
-      const apiKey = process.env.API_KEY || '';
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       
       const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
       audioContextInRef.current = new AudioCtx({ sampleRate: 16000 });
@@ -68,14 +75,18 @@ const App: React.FC = () => {
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
         screenStreamRef.current = screenStream;
-      } catch (err) { console.warn("Screen share declined."); }
+      } catch (err) { 
+        console.warn("Screen share declined, continuing with voice only."); 
+      }
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
-          systemInstruction: `You are Dr. Ronit Lami, a premier wealth psychologist. Provide high-status, clinically insightful guidance. Be authoritative, calm, and concise. Use visual cues from the screen to provide more context to your answers.`,
+          speechConfig: { 
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } 
+          },
+          systemInstruction: 'You are Dr. Ronit Lami, a premier wealth psychologist. Provide high-status, clinically insightful guidance. Be authoritative, calm, and concise. Use visual cues from the screen to provide more context to your answers.',
         },
         callbacks: {
           onopen: () => {
@@ -85,7 +96,10 @@ const App: React.FC = () => {
               const scriptProcessor = audioContextInRef.current.createScriptProcessor(4096, 1, 1);
               scriptProcessor.onaudioprocess = (e) => {
                 const inputData = e.inputBuffer.getChannelData(0);
-                sessionPromise.then(s => s.sendRealtimeInput({ media: createPcmBlob(inputData) }));
+                const pcmBlob = createPcmBlob(inputData);
+                sessionPromise.then(session => {
+                  session.sendRealtimeInput({ media: pcmBlob });
+                });
               };
               source.connect(scriptProcessor);
               scriptProcessor.connect(audioContextInRef.current.destination);
@@ -104,40 +118,53 @@ const App: React.FC = () => {
                   canvasRef.current.toBlob(async (blob) => {
                     if (blob) {
                       const base64 = await blobToBase64(blob);
-                      sessionPromise.then(s => s.sendRealtimeInput({ media: { data: base64, mimeType: 'image/jpeg' } }));
+                      sessionPromise.then(session => {
+                        session.sendRealtimeInput({ media: { data: base64, mimeType: 'image/jpeg' } });
+                      });
                     }
-                  }, 'image/jpeg', 0.5);
+                  }, 'image/jpeg', 0.6);
                 }
-              }, 2000);
+              }, 1500);
             }
           },
-          onmessage: async (m: LiveServerMessage) => {
-            try {
-              if (!m?.serverContent?.modelTurn?.parts) return;
-              const turn = m.serverContent.modelTurn;
-              const firstPart = turn.parts[0];
-              if (!firstPart?.inlineData?.data) return;
+          onmessage: async (message: LiveServerMessage) => {
+            // Handle Interruption
+            if (message.serverContent?.interrupted) {
+              sourcesRef.current.forEach(source => {
+                try { source.stop(); } catch(e) {}
+              });
+              sourcesRef.current.clear();
+              nextStartTimeRef.current = 0;
+              setAiMode('listening');
+              return;
+            }
 
-              const data = firstPart.inlineData.data;
+            // Handle Audio Output
+            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (base64Audio && audioContextOutRef.current) {
               const ctx = audioContextOutRef.current;
-              if (ctx) {
-                if (ctx.state === 'suspended') await ctx.resume();
-                nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-                const buf = await decodeAudioData(decode(data), ctx, 24000, 1);
-                const s = ctx.createBufferSource();
-                s.buffer = buf;
-                s.connect(ctx.destination);
-                s.onended = () => {
-                  sourcesRef.current.delete(s);
+              if (ctx.state === 'suspended') await ctx.resume();
+              
+              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+              
+              try {
+                const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, 24000, 1);
+                const source = ctx.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(ctx.destination);
+                
+                source.onended = () => {
+                  sourcesRef.current.delete(source);
                   if (sourcesRef.current.size === 0) setAiMode('listening');
                 };
-                s.start(nextStartTimeRef.current);
-                nextStartTimeRef.current += buf.duration;
-                sourcesRef.current.add(s);
+                
+                source.start(nextStartTimeRef.current);
+                nextStartTimeRef.current += audioBuffer.duration;
+                sourcesRef.current.add(source);
                 setAiMode('speaking');
+              } catch (err) {
+                console.error("Audio playback error:", err);
               }
-            } catch (err) {
-              console.error("Audio processing failed:", err);
             }
           },
           onclose: () => stopAiSession(),
@@ -169,7 +196,8 @@ const App: React.FC = () => {
             ))}
             <button 
               onClick={startAiSession}
-              className="bg-brand-dark text-white px-9 py-3 rounded-sm text-[10px] font-bold uppercase tracking-[0.3em] hover:bg-brand-orange transition-all duration-300 shadow-lg"
+              disabled={isAiActive}
+              className="bg-brand-dark text-white px-9 py-3 rounded-sm text-[10px] font-bold uppercase tracking-[0.3em] hover:bg-brand-orange transition-all duration-300 shadow-lg disabled:opacity-50"
             >
               Virtual Advisory
             </button>
@@ -194,7 +222,11 @@ const App: React.FC = () => {
               I help families leverage financial success to bring family harmony, prepare for inheritance, create meaningful legacy, and build relationships that thrive, not just survive.
             </p>
             <div className="flex gap-8">
-              <button onClick={startAiSession} className="bg-brand-yellow text-brand-dark px-12 py-5 text-[11px] font-bold uppercase tracking-[0.4em] hover:bg-white transition-all duration-500 shadow-xl">
+              <button 
+                onClick={startAiSession} 
+                disabled={isAiActive}
+                className="bg-brand-yellow text-brand-dark px-12 py-5 text-[11px] font-bold uppercase tracking-[0.4em] hover:bg-white transition-all duration-500 shadow-xl disabled:opacity-50"
+              >
                 Virtual Advisory Mode
               </button>
               <button className="border border-white/20 text-white px-12 py-5 text-[11px] font-bold uppercase tracking-[0.4em] hover:bg-white/5 transition-all">
