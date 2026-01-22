@@ -71,7 +71,7 @@ const App: React.FC = () => {
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
-          systemInstruction: `You are Dr. Ronit Lami, a premier wealth psychologist. Provide high-status, clinically insightful guidance. Be authoritative, calm, and concise. Use visual cues from the screen to provide more context to your answers.`,
+          systemInstruction: `You are Dr. Ronit Lami, a premier wealth psychologist. Provide high-status, clinically insightful guidance. Be authoritative, calm, and concise.`,
         },
         callbacks: {
           onopen: () => {
@@ -108,23 +108,18 @@ const App: React.FC = () => {
             }
           },
           onmessage: async (m: LiveServerMessage) => {
-            try {
-              if (!m.serverContent) return;
-              const content = m.serverContent;
-
-              if (!content.modelTurn) return;
-              const turn = content.modelTurn;
-
-              if (!turn.parts || turn.parts.length === 0) return;
-              const part = turn.parts[0];
-
-              if (!part.inlineData || !part.inlineData.data) return;
-              const base64Data = part.inlineData.data;
+            const serverContent = m.serverContent;
+            const modelTurn = serverContent?.modelTurn;
+            const parts = modelTurn?.parts;
+            
+            if (parts && parts.length > 0 && audioContextOutRef.current) {
+              const part = parts[0];
+              const data = part.inlineData?.data;
               
-              const ctx = audioContextOutRef.current;
-              if (ctx) {
+              if (data) {
+                const ctx = audioContextOutRef.current;
                 nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-                const buf = await decodeAudioData(decode(base64Data), ctx, 24000, 1);
+                const buf = await decodeAudioData(decode(data), ctx, 24000, 1);
                 const s = ctx.createBufferSource();
                 s.buffer = buf;
                 s.connect(ctx.destination);
@@ -137,8 +132,6 @@ const App: React.FC = () => {
                 sourcesRef.current.add(s);
                 setAiMode('speaking');
               }
-            } catch (err) {
-              console.error("Error processing AI message:", err);
             }
           },
           onclose: () => stopAiSession(),
