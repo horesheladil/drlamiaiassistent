@@ -51,10 +51,12 @@ const App: React.FC = () => {
     try {
       setIsAiActive(true);
       setAiMode('connecting');
-      const apiKey = process.env.API_KEY || '';
+      
+      // Use cast to bypass TypeScript env variable checks during the Vercel build phase
+      const apiKey = (process.env as any).API_KEY || '';
       const ai = new GoogleGenAI({ apiKey });
       
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
       audioContextInRef.current = new AudioCtx({ sampleRate: 16000 });
       audioContextOutRef.current = new AudioCtx({ sampleRate: 24000 });
       
@@ -71,7 +73,7 @@ const App: React.FC = () => {
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
-          systemInstruction: `You are Dr. Ronit Lami, a premier wealth psychologist. Provide high-status, clinically insightful guidance. Be authoritative, calm, and concise.`,
+          systemInstruction: `You are Dr. Ronit Lami, a premier wealth psychologist. Provide high-status, clinically insightful guidance. Be authoritative, calm, and concise. Use visual cues from the screen to provide more context to your answers.`,
         },
         callbacks: {
           onopen: () => {
@@ -108,18 +110,24 @@ const App: React.FC = () => {
             }
           },
           onmessage: async (m: LiveServerMessage) => {
-            const serverContent = m.serverContent;
-            const modelTurn = serverContent?.modelTurn;
-            const parts = modelTurn?.parts;
-            
-            if (parts && parts.length > 0 && audioContextOutRef.current) {
+            try {
+              // Extremely defensive property checking for strict TypeScript builds
+              if (!m) return;
+              const content = m.serverContent;
+              if (!content) return;
+              const turn = content.modelTurn;
+              if (!turn) return;
+              const parts = turn.parts;
+              if (!parts || parts.length === 0) return;
               const part = parts[0];
-              const data = part.inlineData?.data;
+              if (!part.inlineData || !part.inlineData.data) return;
+
+              const base64Data = part.inlineData.data;
+              const ctx = audioContextOutRef.current;
               
-              if (data) {
-                const ctx = audioContextOutRef.current;
+              if (ctx) {
                 nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-                const buf = await decodeAudioData(decode(data), ctx, 24000, 1);
+                const buf = await decodeAudioData(decode(base64Data), ctx, 24000, 1);
                 const s = ctx.createBufferSource();
                 s.buffer = buf;
                 s.connect(ctx.destination);
@@ -132,6 +140,8 @@ const App: React.FC = () => {
                 sourcesRef.current.add(s);
                 setAiMode('speaking');
               }
+            } catch (err) {
+              console.error("Audio processing failed", err);
             }
           },
           onclose: () => stopAiSession(),
